@@ -129,11 +129,12 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 
 async function main() {
   const flag = process.argv[2];
-  if (flag === '--setup' || flag === '--configure' || flag === '--remove') {
-    const { runSetup, runConfigure, runRemove } = await import('./setup.js');
+  if (flag === '--setup' || flag === '--configure' || flag === '--remove' || flag === '--daemon') {
+    const { runSetup, runConfigure, runRemove, runDaemon } = await import('./setup.js');
     if (flag === '--setup') await runSetup();
     else if (flag === '--configure') await runConfigure();
-    else await runRemove();
+    else if (flag === '--remove') await runRemove();
+    else await runDaemon(process.argv[3] ?? '');
     return;
   }
 

@@ -381,6 +381,13 @@ export async function runConfigure(): Promise<void> {
     // LaunchAgent
     if (runMode === 'launchagent') {
       await installLaunchAgent(defaultBase, cfg.logsDir, cfg.logTtlDays);
+    } else if (currentRunMode === 'launchagent') {
+      // User switched from launchagent → standalone; unload the existing one.
+      const { execSync } = await import('node:child_process');
+      const daemonSh = resolve(__dirname, '..', 'scripts', 'daemon.sh');
+      if (existsSync(daemonSh)) {
+        try { execSync(`bash "${daemonSh}" stop`, { stdio: 'inherit' }); } catch { /* not running */ }
+      }
     }
 
     console.log('\n✅ Reconfiguration complete!');
@@ -476,5 +483,44 @@ export async function runRemove(): Promise<void> {
   } catch (err) {
     rl.close();
     throw err;
+  }
+}
+
+export async function runDaemon(action: string): Promise<void> {
+  const valid = ['start', 'stop', 'remove', 'status', 'restart'];
+  if (!valid.includes(action)) {
+    console.error(`usage: mcp-agent-memory --daemon {${valid.join('|')}}`);
+    process.exit(1);
+  }
+  if (platform !== 'darwin') {
+    console.error('--daemon is macOS-only (manages a LaunchAgent).');
+    process.exit(1);
+  }
+
+  const scriptsDir = resolve(__dirname, '..', 'scripts');
+  const daemonSh = join(scriptsDir, 'daemon.sh');
+  if (!existsSync(daemonSh)) {
+    console.error('scripts/daemon.sh not found. Is the package installed correctly?');
+    process.exit(1);
+  }
+
+  const configPath = join(homedir(), '.agent-memory', 'memconsolidate.toml');
+  const { execSync } = await import('node:child_process');
+
+  // Pull log settings from config comment so `start` restarts with the saved values.
+  let env = { ...process.env };
+  if (existsSync(configPath)) {
+    const content = await readFile(configPath, 'utf-8');
+    const m = content.match(/^#\s*mcp-agent-memory setup:\s*logs_dir=(\S+)\s+log_ttl_days=(\d+)/m);
+    if (m) env = { ...env, LOG_DIR: m[1], LOG_TTL_DAYS: m[2] };
+  }
+
+  const run = (cmd: string) => execSync(`bash "${daemonSh}" ${cmd} "${configPath}"`, { stdio: 'inherit', env });
+
+  if (action === 'restart') {
+    try { run('stop'); } catch { /* may not be running */ }
+    run('start');
+  } else {
+    run(action);
   }
 }
