@@ -1,0 +1,140 @@
+#!/usr/bin/env node
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { readFile, readdir, appendFile, mkdir, stat } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { homedir } from 'node:os';
+
+const MEMORY_DIR = resolve(process.env.MEMORY_DIRECTORY ?? join(homedir(), '.agent-memory', 'memory'));
+const SESSION_DIR = resolve(process.env.SESSION_DIRECTORY ?? join(homedir(), '.agent-memory', 'sessions'));
+
+async function ensureDir(path: string): Promise<void> {
+  if (!existsSync(path)) await mkdir(path, { recursive: true });
+}
+
+async function readIndex(): Promise<string> {
+  const indexPath = join(MEMORY_DIR, 'MEMORY.md');
+  if (!existsSync(indexPath)) return '(no memories yet)';
+  return readFile(indexPath, 'utf-8');
+}
+
+async function readTopics(topics: string[]): Promise<string> {
+  const parts: string[] = [];
+  for (const topic of topics) {
+    const safe = topic.replace(/[^a-zA-Z0-9_.-]/g, '');
+    if (!safe) continue;
+    const path = join(MEMORY_DIR, safe.endsWith('.md') ? safe : `${safe}.md`);
+    if (existsSync(path)) {
+      parts.push(`# ${safe}\n\n${await readFile(path, 'utf-8')}`);
+    }
+  }
+  return parts.join('\n\n---\n\n') || '(no matching topic files)';
+}
+
+async function appendSession(content: string, source?: string): Promise<string> {
+  await ensureDir(SESSION_DIR);
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const tag = (source ?? 'mcp').replace(/[^a-zA-Z0-9_-]/g, '');
+  const filename = `${ts}-${tag}.md`;
+  const path = join(SESSION_DIR, filename);
+  const frontmatter = `---\nsource: ${tag}\ntimestamp: ${new Date().toISOString()}\n---\n\n`;
+  await appendFile(path, frontmatter + content, 'utf-8');
+  return filename;
+}
+
+async function searchMemory(query: string): Promise<string> {
+  if (!existsSync(MEMORY_DIR)) return '(memory directory does not exist)';
+  const q = query.toLowerCase();
+  const files = (await readdir(MEMORY_DIR)).filter((f) => f.endsWith('.md'));
+  const hits: string[] = [];
+  for (const file of files) {
+    const content = await readFile(join(MEMORY_DIR, file), 'utf-8');
+    if (content.toLowerCase().includes(q)) {
+      const snippet = content.split('\n').filter((l) => l.toLowerCase().includes(q)).slice(0, 3).join('\n');
+      hits.push(`## ${file}\n${snippet}`);
+    }
+  }
+  return hits.join('\n\n') || `(no matches for "${query}")`;
+}
+
+const server = new Server(
+  { name: 'mcp-server-memory', version: '0.1.0' },
+  { capabilities: { tools: {} } }
+);
+
+server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  tools: [
+    {
+      name: 'memory_read',
+      description: 'Read the agent memory index (MEMORY.md) and optionally specific topic files. Call this at the start of a conversation to load context.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          topics: { type: 'array', items: { type: 'string' }, description: 'Optional topic file names to load in full (e.g., ["preferences", "projects"])' },
+        },
+      },
+    },
+    {
+      name: 'memory_append_session',
+      description: 'Append a session summary to the sessions directory. The daemon will later extract durable memories from it. Call this at the end of meaningful exchanges.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          content: { type: 'string', description: 'Markdown-formatted session summary' },
+          source: { type: 'string', description: 'Origin tag, e.g., "kiro", "claude-desktop"' },
+        },
+        required: ['content'],
+      },
+    },
+    {
+      name: 'memory_search',
+      description: 'Search memory files for a substring. Use this to recall specific facts without loading everything.',
+      inputSchema: {
+        type: 'object',
+        properties: { query: { type: 'string' } },
+        required: ['query'],
+      },
+    },
+  ],
+}));
+
+server.setRequestHandler(CallToolRequestSchema, async (req) => {
+  const { name, arguments: args } = req.params;
+  try {
+    if (name === 'memory_read') {
+      const topics = (args?.topics as string[] | undefined) ?? [];
+      const index = await readIndex();
+      const topicContent = topics.length > 0 ? `\n\n---\n\n${await readTopics(topics)}` : '';
+      return { content: [{ type: 'text', text: index + topicContent }] };
+    }
+    if (name === 'memory_append_session') {
+      const content = String(args?.content ?? '');
+      if (!content.trim()) throw new Error('content is required');
+      const filename = await appendSession(content, args?.source as string | undefined);
+      return { content: [{ type: 'text', text: `Wrote session: ${filename}` }] };
+    }
+    if (name === 'memory_search') {
+      const query = String(args?.query ?? '');
+      if (!query.trim()) throw new Error('query is required');
+      return { content: [{ type: 'text', text: await searchMemory(query) }] };
+    }
+    throw new Error(`Unknown tool: ${name}`);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { content: [{ type: 'text', text: `Error: ${message}` }], isError: true };
+  }
+});
+
+async function main() {
+  await ensureDir(MEMORY_DIR);
+  await ensureDir(SESSION_DIR);
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}
+
+main().catch((err) => {
+  console.error('mcp-server-memory fatal:', err);
+  process.exit(1);
+});
