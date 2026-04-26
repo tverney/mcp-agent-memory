@@ -91,7 +91,7 @@ function buildToml(cfg: Config): string {
   return lines.join('\n') + '\n';
 }
 
-function mcpServerBlock(cfg: Config): Record<string, unknown> {
+function mcpServerBlock(cfg: { baseDir: string }): Record<string, unknown> {
   return {
     command: 'npx',
     args: ['-y', 'mcp-agent-memory'],
@@ -244,41 +244,47 @@ async function installKiroAgent(): Promise<void> {
 export async function runSetup(): Promise<void> {
   const rl = createInterface({ input: stdin, output: stdout });
   console.log('\n🧠 mcp-agent-memory setup\n');
+  console.log('The MCP server provides memory read/write/search tools to AI clients.');
+  console.log('The optional daemon consolidates sessions into durable memories using an LLM.\n');
 
   try {
     // 1. Base directory
     const baseDir = resolve(await ask(rl, 'Memory directory', join(homedir(), '.agent-memory')));
 
-    // 2. Backend
-    const backendCfg = await promptBackend(rl);
+    // 2. Daemon opt-in
+    const useDaemon = await yesNo(rl, 'Install the consolidation daemon? (needed to auto-extract memories)', true);
 
-    // 3. Consolidation
-    const consolCfg = await promptConsolidation(rl);
+    // 3+. Daemon-only prompts
+    const backendCfg = useDaemon ? await promptBackend(rl) : undefined;
+    const consolCfg = useDaemon ? await promptConsolidation(rl) : undefined;
+    const runMode = useDaemon ? await promptRunMode(rl) : 'standalone';
+    const logCfg = useDaemon ? await promptLogs(rl, baseDir) : { logsDir: join(baseDir, 'logs'), logTtlDays: 0 };
 
-    // 4. Run mode
-    const runMode = await promptRunMode(rl);
-
-    // 5. Log settings
-    const logCfg = await promptLogs(rl, baseDir);
-
-    // 6. Client registration
+    // Client registration (always)
     const clients = await promptClients(rl);
 
     rl.close();
 
-    const cfg: Config = { baseDir, ...backendCfg, ...consolCfg, runMode, ...logCfg, clients };
-
-    // Write config
+    // Create memory dirs regardless — the MCP reads/writes these even without the daemon.
     await mkdir(baseDir, { recursive: true });
     await mkdir(join(baseDir, 'memory'), { recursive: true });
     await mkdir(join(baseDir, 'sessions'), { recursive: true });
-    await mkdir(cfg.logsDir, { recursive: true });
-    const tomlPath = join(baseDir, 'memconsolidate.toml');
-    await writeFile(tomlPath, buildToml(cfg), 'utf-8');
-    console.log(`\n✓ Config written → ${tomlPath}`);
 
-    // Register clients
-    const block = mcpServerBlock(cfg);
+    // Write daemon config + start it only when opted in.
+    let tomlPath: string | undefined;
+    if (useDaemon && backendCfg && consolCfg) {
+      const cfg: Config = { baseDir, ...backendCfg, ...consolCfg, runMode, ...logCfg, clients };
+      await mkdir(cfg.logsDir, { recursive: true });
+      tomlPath = join(baseDir, 'memconsolidate.toml');
+      await writeFile(tomlPath, buildToml(cfg), 'utf-8');
+      console.log(`\n✓ Daemon config written → ${tomlPath}`);
+
+      if (cfg.backend === 'kiro') await installKiroAgent();
+      if (runMode === 'launchagent') await installLaunchAgent(baseDir, cfg.logsDir, cfg.logTtlDays);
+    }
+
+    // Register clients — uses the memory/session dirs, not the daemon config.
+    const block = mcpServerBlock({ baseDir });
     for (const client of clients) {
       const path = clientConfigPath(client);
       if (!path) continue;
@@ -286,20 +292,13 @@ export async function runSetup(): Promise<void> {
       console.log(`✓ Registered in ${client} → ${path}`);
     }
 
-    // Kiro lean agent
-    if (cfg.backend === 'kiro') {
-      await installKiroAgent();
-    }
-
-    // LaunchAgent
-    if (runMode === 'launchagent') {
-      await installLaunchAgent(baseDir, cfg.logsDir, cfg.logTtlDays);
-    }
-
     console.log('\n✅ Setup complete!');
-    if (runMode === 'standalone') {
+    if (!useDaemon) {
+      console.log('\nMCP-only mode: agents can read/write/search memory, but sessions won\'t be');
+      console.log('auto-consolidated into durable memories. Run --configure later to add the daemon.');
+    } else if (runMode === 'standalone' && tomlPath) {
       console.log(`\nTo start the daemon manually:\n  agent-memory-daemon start ${tomlPath}`);
-      console.log(`  (redirect logs: >> ${cfg.logsDir}/daemon.out.log 2>> ${cfg.logsDir}/daemon.err.log)`);
+      console.log(`  (redirect logs: >> ${logCfg.logsDir}/daemon.out.log 2>> ${logCfg.logsDir}/daemon.err.log)`);
     }
     console.log('Restart your MCP client to pick up the new config.\n');
   } catch (err) {
@@ -316,73 +315,68 @@ export async function runConfigure(): Promise<void> {
     // Find existing config
     const defaultBase = join(homedir(), '.agent-memory');
     const tomlPath = join(defaultBase, 'memconsolidate.toml');
-    if (!existsSync(tomlPath)) {
-      console.log(`No existing config found at ${tomlPath}. Run --setup first.`);
-      rl.close();
-      return;
-    }
-
-    const existing = await readFile(tomlPath, 'utf-8');
+    const daemonConfigured = existsSync(tomlPath);
+    const existing = daemonConfigured ? await readFile(tomlPath, 'utf-8') : '';
     const currentBackend = existing.match(/^name\s*=\s*"(\w+)"/m)?.[1] || 'bedrock';
 
     console.log(`Using memory directory: ${defaultBase}`);
-    console.log(`Current backend: ${currentBackend}\n`);
+    if (daemonConfigured) console.log(`Current backend: ${currentBackend}`);
+    else console.log('No daemon config found — running in MCP-only mode.');
+    console.log('');
 
-    // 1. Backend
-    const backendCfg = await promptBackend(rl, currentBackend);
+    // Daemon toggle
+    const useDaemon = await yesNo(rl, daemonConfigured ? 'Keep the consolidation daemon?' : 'Add the consolidation daemon?', daemonConfigured);
 
-    // 2. Consolidation — parse current values as defaults
-    const parseNum = (key: string, fallback: number) => {
-      const m = existing.match(new RegExp(`^${key}\\s*=\\s*(\\d+)`, 'm'));
-      return m ? parseInt(m[1], 10) : fallback;
-    };
-    const consolCfg = await promptConsolidation(rl, {
-      ...DEFAULTS,
-      minHours: parseNum('min_hours', DEFAULTS.minHours),
-      minSessions: parseNum('min_sessions', DEFAULTS.minSessions),
-      extractionIntervalMs: parseNum('extraction_interval_ms', DEFAULTS.extractionIntervalMs),
-      maxExtractionSessionChars: parseNum('max_extraction_session_chars', DEFAULTS.maxExtractionSessionChars),
-    });
-
-    // 3. Run mode
+    let backendCfg: Awaited<ReturnType<typeof promptBackend>> | undefined;
+    let consolCfg: Awaited<ReturnType<typeof promptConsolidation>> | undefined;
+    let runMode: 'standalone' | 'launchagent' = 'standalone';
+    let logCfg = { logsDir: join(defaultBase, 'logs'), logTtlDays: 0 };
     const currentRunMode = existsSync(join(homedir(), 'Library', 'LaunchAgents', 'com.agent-memory-daemon.plist')) ? 'launchagent' : 'standalone';
-    const runMode = await promptRunMode(rl, currentRunMode);
 
-    // 4. Log settings (parse current values from the comment line)
-    const logsMatch = existing.match(/^#\s*mcp-agent-memory setup:\s*logs_dir=(\S+)\s+log_ttl_days=(\d+)/m);
-    const logCfg = await promptLogs(rl, defaultBase, logsMatch?.[1], logsMatch ? parseInt(logsMatch[2], 10) : 0);
+    if (useDaemon) {
+      backendCfg = await promptBackend(rl, daemonConfigured ? currentBackend : undefined);
 
-    // 5. Client registration
+      const parseNum = (key: string, fallback: number) => {
+        const m = existing.match(new RegExp(`^${key}\\s*=\\s*(\\d+)`, 'm'));
+        return m ? parseInt(m[1], 10) : fallback;
+      };
+      consolCfg = await promptConsolidation(rl, {
+        ...DEFAULTS,
+        minHours: parseNum('min_hours', DEFAULTS.minHours),
+        minSessions: parseNum('min_sessions', DEFAULTS.minSessions),
+        extractionIntervalMs: parseNum('extraction_interval_ms', DEFAULTS.extractionIntervalMs),
+        maxExtractionSessionChars: parseNum('max_extraction_session_chars', DEFAULTS.maxExtractionSessionChars),
+      });
+
+      runMode = await promptRunMode(rl, currentRunMode);
+
+      const logsMatch = existing.match(/^#\s*mcp-agent-memory setup:\s*logs_dir=(\S+)\s+log_ttl_days=(\d+)/m);
+      logCfg = await promptLogs(rl, defaultBase, logsMatch?.[1], logsMatch ? parseInt(logsMatch[2], 10) : 0);
+    }
+
     const clients = await promptClients(rl);
 
     rl.close();
 
-    const cfg: Config = { baseDir: defaultBase, ...backendCfg, ...consolCfg, runMode, ...logCfg, clients };
+    // Daemon config + install
+    if (useDaemon && backendCfg && consolCfg) {
+      const cfg: Config = { baseDir: defaultBase, ...backendCfg, ...consolCfg, runMode, ...logCfg, clients };
+      await mkdir(cfg.logsDir, { recursive: true });
+      await writeFile(tomlPath, buildToml(cfg), 'utf-8');
+      console.log(`\n✓ Config updated → ${tomlPath}`);
 
-    // Write config
-    await mkdir(cfg.logsDir, { recursive: true });
-    await writeFile(tomlPath, buildToml(cfg), 'utf-8');
-    console.log(`\n✓ Config updated → ${tomlPath}`);
-
-    // Register clients
-    const block = mcpServerBlock(cfg);
-    for (const client of clients) {
-      const path = clientConfigPath(client);
-      if (!path) continue;
-      await mergeJsonConfig(path, block);
-      console.log(`✓ Registered in ${client} → ${path}`);
-    }
-
-    // Kiro lean agent
-    if (cfg.backend === 'kiro') {
-      await installKiroAgent();
-    }
-
-    // LaunchAgent
-    if (runMode === 'launchagent') {
-      await installLaunchAgent(defaultBase, cfg.logsDir, cfg.logTtlDays);
+      if (cfg.backend === 'kiro') await installKiroAgent();
+      if (runMode === 'launchagent') {
+        await installLaunchAgent(defaultBase, cfg.logsDir, cfg.logTtlDays);
+      } else if (currentRunMode === 'launchagent') {
+        const { execSync } = await import('node:child_process');
+        const daemonSh = resolve(__dirname, '..', 'scripts', 'daemon.sh');
+        if (existsSync(daemonSh)) {
+          try { execSync(`bash "${daemonSh}" stop`, { stdio: 'inherit' }); } catch { /* not running */ }
+        }
+      }
     } else if (currentRunMode === 'launchagent') {
-      // User switched from launchagent → standalone; unload the existing one.
+      // User disabled the daemon entirely — unload the LaunchAgent.
       const { execSync } = await import('node:child_process');
       const daemonSh = resolve(__dirname, '..', 'scripts', 'daemon.sh');
       if (existsSync(daemonSh)) {
@@ -390,10 +384,19 @@ export async function runConfigure(): Promise<void> {
       }
     }
 
+    // Register clients
+    const block = mcpServerBlock({ baseDir: defaultBase });
+    for (const client of clients) {
+      const path = clientConfigPath(client);
+      if (!path) continue;
+      await mergeJsonConfig(path, block);
+      console.log(`✓ Registered in ${client} → ${path}`);
+    }
+
     console.log('\n✅ Reconfiguration complete!');
-    if (runMode === 'standalone') {
+    if (useDaemon && runMode === 'standalone') {
       console.log(`\nRestart the daemon:\n  agent-memory-daemon start ${tomlPath}`);
-      console.log(`  (redirect logs: >> ${cfg.logsDir}/daemon.out.log 2>> ${cfg.logsDir}/daemon.err.log)`);
+      console.log(`  (redirect logs: >> ${logCfg.logsDir}/daemon.out.log 2>> ${logCfg.logsDir}/daemon.err.log)`);
     }
     console.log('Restart your MCP client to pick up any changes.\n');
   } catch (err) {
