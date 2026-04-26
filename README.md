@@ -49,7 +49,7 @@ agent-memory-daemon start ~/.agent-memory/memconsolidate.toml
 
 See [`examples/memconsolidate.toml`](./examples/memconsolidate.toml) for a ready-to-use config that matches the directory layout this MCP server expects.
 
-### Use Kiro as the LLM backend (Amazon employees)
+### Use Kiro as the LLM backend
 
 If you have Kiro credits, you can run the daemon through `kiro-cli` instead of paying for Bedrock or OpenAI API calls. This requires `agent-memory-daemon` **≥ 2.7** (branch `feat/kiro-backend`) which adds a `kiro` backend.
 
