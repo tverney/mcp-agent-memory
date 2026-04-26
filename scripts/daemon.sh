@@ -3,7 +3,7 @@
 # Usage: ./scripts/daemon.sh {start|stop|remove|status} [config-path]
 set -euo pipefail
 
-LABEL="com.tverney.agent-memory-daemon"
+LABEL="com.agent-memory-daemon"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 LOG_DIR="$HOME/.agent-memory/logs"
 CONFIG="${2:-$HOME/.agent-memory/memconsolidate.toml}"
