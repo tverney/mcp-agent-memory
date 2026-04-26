@@ -128,6 +128,15 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 });
 
 async function main() {
+  const flag = process.argv[2];
+  if (flag === '--setup' || flag === '--configure' || flag === '--remove') {
+    const { runSetup, runConfigure, runRemove } = await import('./setup.js');
+    if (flag === '--setup') await runSetup();
+    else if (flag === '--configure') await runConfigure();
+    else await runRemove();
+    return;
+  }
+
   await ensureDir(MEMORY_DIR);
   await ensureDir(SESSION_DIR);
   const transport = new StdioServerTransport();
