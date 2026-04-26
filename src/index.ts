@@ -132,6 +132,13 @@ async function main() {
   await ensureDir(SESSION_DIR);
   const transport = new StdioServerTransport();
   await server.connect(transport);
+
+  const shutdown = () => process.exit(0);
+  process.stdin.on('end', shutdown);
+  process.stdin.on('close', shutdown);
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
+  process.on('disconnect', shutdown);
 }
 
 main().catch((err) => {
