@@ -49,6 +49,19 @@ agent-memory-daemon start ~/.agent-memory/memconsolidate.toml
 
 See [`examples/memconsolidate.toml`](./examples/memconsolidate.toml) for a ready-to-use config that matches the directory layout this MCP server expects.
 
+#### Run the daemon at login (macOS)
+
+Instead of starting the daemon manually, register it as a LaunchAgent:
+
+```bash
+./scripts/daemon.sh start          # install plist, load it, start at login
+./scripts/daemon.sh status         # check if it's running
+./scripts/daemon.sh stop           # unload (keeps the plist)
+./scripts/daemon.sh remove         # unload and delete the plist
+```
+
+Pass a custom config path as a second arg: `./scripts/daemon.sh start /path/to/config.toml`. Logs land in `~/.agent-memory/logs/daemon.{out,err}.log`. `remove` leaves your config and memory files untouched.
+
 ### Use Kiro as the LLM backend
 
 If you have Kiro credits, you can run the daemon through `kiro-cli` instead of paying for Bedrock or OpenAI API calls. This requires `agent-memory-daemon` **≥ 2.7** (branch `feat/kiro-backend`) which adds a `kiro` backend.
