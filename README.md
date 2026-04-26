@@ -49,6 +49,30 @@ agent-memory-daemon start ~/.agent-memory/memconsolidate.toml
 
 See [`examples/memconsolidate.toml`](./examples/memconsolidate.toml) for a ready-to-use config that matches the directory layout this MCP server expects.
 
+### Use Kiro as the LLM backend (Amazon employees)
+
+If you have Kiro credits, you can run the daemon through `kiro-cli` instead of paying for Bedrock or OpenAI API calls. This requires `agent-memory-daemon` **≥ 2.7** (branch `feat/kiro-backend`) which adds a `kiro` backend.
+
+```toml
+[llm_backend]
+name = "kiro"
+# optional overrides:
+# binary = "/custom/path/to/kiro-cli"
+# agent = "memconsolidate"          # set to "" to use Kiro's default session context (not recommended)
+# model = "claude-sonnet-4-20250514"
+# timeoutMs = 300000
+```
+
+**Use a lean agent to cut token usage by ~7×.** By default, every `kiro-cli chat` call loads Kiro's full system prompt plus every MCP tool schema from your global config — roughly 12–18K extra input tokens per call. Create a minimal agent that skips all of that:
+
+```bash
+cp examples/kiro-agent-memconsolidate.json ~/.kiro/agents/memconsolidate.json
+```
+
+The Kiro backend passes `--agent memconsolidate` automatically, so no further config is needed. Measured on a trivial prompt: **0.01 credits with the lean agent vs. 0.07 credits with the default** (same output quality).
+
+See [`examples/kiro-agent-memconsolidate.json`](./examples/kiro-agent-memconsolidate.json) — the agent has `mcpServers: {}`, `tools: []`, and `useLegacyMcpJson: false` so it doesn't inherit anything from your global Kiro config.
+
 ## Configure Kiro (CLI and IDE)
 
 Edit `~/.kiro/settings/mcp.json`:

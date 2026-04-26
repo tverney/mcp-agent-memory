@@ -1,0 +1,14 @@
+{
+  "$schema": "https://raw.githubusercontent.com/aws/amazon-q-developer-cli/refs/heads/main/schemas/agent-v1.json",
+  "name": "memconsolidate",
+  "description": "Minimal agent for agent-memory-daemon. No MCP servers, no tools — just prompt-in, JSON-out.",
+  "prompt": "You are a memory consolidation assistant. Respond ONLY with a valid JSON object matching the requested shape. No markdown fences, no prose, no commentary.",
+  "mcpServers": {},
+  "tools": [],
+  "toolAliases": {},
+  "allowedTools": [],
+  "resources": [],
+  "hooks": {},
+  "toolsSettings": {},
+  "useLegacyMcpJson": false
+}
