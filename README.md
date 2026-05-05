@@ -19,11 +19,30 @@ The daemon does the thinking (consolidation + extraction); this server is a thin
 
 ## Tools exposed
 
-| Tool | Purpose |
-|---|---|
-| `memory_read` | Load `MEMORY.md` index (and optional topic files) into the agent's context |
-| `memory_append_session` | Write a session summary for the daemon to later extract memories from |
-| `memory_search` | Substring search across memory files |
+### `memory_read`
+
+Read the agent memory index (MEMORY.md) and optionally specific topic files. Call with no arguments to load only the lightweight index (cheap). Pass `topics` only when you need the full content of a specific topic file.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `topics` | `string[]` | No | Topic file names to load in full (e.g., `["preferences", "projects"]`). Omit to return the index only. |
+
+### `memory_append_session`
+
+Append a session summary to the sessions directory. The daemon will later extract durable memories from it. Call this at the end of meaningful exchanges. Keep summaries focused on durable findings and decisions (target 300–800 tokens), not play-by-play — longer summaries cost more during consolidation.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `content` | `string` | Yes | Markdown-formatted session summary. Use structured headers and bullets for better extraction; avoid verbose prose. |
+| `source` | `string` | No | Origin tag, e.g., `"kiro"`, `"claude-desktop"` |
+
+### `memory_search`
+
+Search memory files for a substring. Use this to recall specific facts without loading everything.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `query` | `string` | Yes | The substring to search for across all memory files. |
 
 ## Install
 
@@ -148,11 +167,14 @@ Edit `~/.kiro/settings/mcp.json`:
         "SESSION_DIRECTORY": "~/.agent-memory/sessions"
       },
       "disabled": false,
-      "timeout": 30000
+      "timeout": 30000,
+      "autoApprove": ["memory_read", "memory_search", "memory_append_session", "memory_daemon_status"]
     }
   }
 }
 ```
+
+> **Why `autoApprove`?** All memory tools are local-only filesystem operations — they read/write markdown files under `~/.agent-memory/` and never make network calls. Adding them to `autoApprove` lets Kiro call them without prompting you for confirmation each time, which is essential for the seamless "read memory at session start" experience.
 
 Then ask Kiro: *"Read my memory index."* or *"Remember this: I prefer pnpm over npm."*
 
@@ -169,7 +191,8 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) o
       "env": {
         "MEMORY_DIRECTORY": "~/.agent-memory/memory",
         "SESSION_DIRECTORY": "~/.agent-memory/sessions"
-      }
+      },
+      "autoApprove": ["memory_read", "memory_search", "memory_append_session", "memory_daemon_status"]
     }
   }
 }
@@ -179,7 +202,7 @@ Restart Claude Desktop. The three `memory_*` tools will appear.
 
 ### Cursor
 
-Add to `~/.cursor/mcp.json` with the same server block.
+Add to `~/.cursor/mcp.json` with the same server block (including `autoApprove`).
 
 ## Environment variables
 
