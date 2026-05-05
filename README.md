@@ -1,8 +1,13 @@
-# mcp-server-memory
+# A Filesystem MCP for Agent Memory
+
+[![mcp-agent-memory MCP server](https://glama.ai/mcp/servers/tverney/mcp-agent-memory/badges/card.svg)](https://glama.ai/mcp/servers/tverney/mcp-agent-memory)
 
 MCP server that exposes [`agent-memory-daemon`](https://github.com/tverney/agent-memory-daemon) to any MCP-compatible client — **Kiro (CLI & IDE), Claude Desktop, Cursor**, and others.
 
 The daemon does the thinking (consolidation + extraction); this server is a thin filesystem bridge so agents can **read**, **append**, and **search** memory through the Model Context Protocol.
+
+<img width="640" height="351" alt="output" src="https://github.com/user-attachments/assets/95fde776-32f4-4f3c-ad82-70385165bde6" />
+
 
 ## How it fits together
 
@@ -198,7 +203,7 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) o
 }
 ```
 
-Restart Claude Desktop. The three `memory_*` tools will appear.
+Restart Claude Desktop. The `memory_*` tools will appear.
 
 ### Cursor
 
