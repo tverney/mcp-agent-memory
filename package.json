@@ -28,9 +28,9 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tverney/mcp-server-memory.git"
+    "url": "git+https://github.com/tverney/mcp-agent-memory.git"
   },
-  "homepage": "https://github.com/tverney/mcp-server-memory",
+  "homepage": "https://github.com/tverney/mcp-agent-memory",
   "author": "tverney",
   "license": "MIT",
   "engines": {
