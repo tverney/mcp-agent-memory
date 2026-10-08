@@ -1,0 +1,16 @@
+[Unit]
+Description=agent-memory-daemon (memory consolidation for mcp-agent-memory)
+Documentation=https://github.com/tverney/mcp-agent-memory
+
+[Service]
+Type=simple
+ExecStart=__DAEMON_BIN__ start __CONFIG__
+Restart=on-failure
+RestartSec=10
+Environment=HOME=__HOME__
+Environment=PATH=__PATH__
+StandardOutput=append:__LOG_DIR__/daemon.out.log
+StandardError=append:__LOG_DIR__/daemon.err.log
+
+[Install]
+WantedBy=default.target

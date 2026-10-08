@@ -18,10 +18,69 @@ interface Config {
   minSessions: number;
   extractionIntervalMs: number;
   maxExtractionSessionChars: number;
-  runMode: 'standalone' | 'launchagent';
+  runMode: RunMode;
   logsDir: string;
   logTtlDays: number;
   clients: string[];
+}
+
+type RunMode = 'standalone' | 'launchagent' | 'systemd';
+
+/** The auto-start service manager for this OS, if any. */
+interface ServiceKind {
+  mode: Exclude<RunMode, 'standalone'>;
+  name: string;           // human-readable
+  script: string;         // control script under scripts/
+  installedPath: string;  // file whose existence means "installed"
+}
+
+function serviceKind(): ServiceKind | undefined {
+  if (platform === 'darwin') {
+    return {
+      mode: 'launchagent',
+      name: 'LaunchAgent',
+      script: resolve(__dirname, '..', 'scripts', 'daemon.sh'),
+      installedPath: join(homedir(), 'Library', 'LaunchAgents', 'com.agent-memory-daemon.plist'),
+    };
+  }
+  if (platform === 'linux') {
+    const configHome = process.env.XDG_CONFIG_HOME || join(homedir(), '.config');
+    return {
+      mode: 'systemd',
+      name: 'systemd user service',
+      script: resolve(__dirname, '..', 'scripts', 'daemon-systemd.sh'),
+      installedPath: join(configHome, 'systemd', 'user', 'agent-memory-daemon.service'),
+    };
+  }
+  return undefined;
+}
+
+function currentRunModeOnDisk(): RunMode {
+  const svc = serviceKind();
+  return svc && existsSync(svc.installedPath) ? svc.mode : 'standalone';
+}
+
+/** Linux only: is a per-user systemd manager reachable? Returns a reason when not. */
+async function systemdUserProblem(): Promise<string | undefined> {
+  const { execFileSync } = await import('node:child_process');
+  try {
+    execFileSync('systemctl', ['--version'], { stdio: 'ignore' });
+  } catch {
+    return 'systemctl not found (host does not use systemd)';
+  }
+  try {
+    execFileSync('systemctl', ['--user', 'show-environment'], { stdio: 'ignore' });
+  } catch {
+    return 'systemd user manager is not reachable (systemctl --user failed)';
+  }
+  return undefined;
+}
+
+async function stopService(): Promise<void> {
+  const svc = serviceKind();
+  if (!svc || !existsSync(svc.script)) return;
+  const { execFileSync } = await import('node:child_process');
+  try { execFileSync('bash', [svc.script, 'stop'], { stdio: 'inherit' }); } catch { /* not running */ }
 }
 
 const DEFAULTS: Omit<Config, 'baseDir' | 'backend' | 'clients' | 'logsDir' | 'logTtlDays'> = {
@@ -159,12 +218,22 @@ async function promptConsolidation(rl: ReturnType<typeof createInterface>, defau
   };
 }
 
-async function promptRunMode(rl: ReturnType<typeof createInterface>, current?: string): Promise<'standalone' | 'launchagent'> {
-  if (platform !== 'darwin') {
-    console.log('\nLaunchAgent is macOS-only. Daemon will run standalone.');
+async function promptRunMode(rl: ReturnType<typeof createInterface>, current?: string): Promise<RunMode> {
+  const svc = serviceKind();
+  if (!svc) {
+    console.log('\nNo supported auto-start service manager on this OS. Daemon will run standalone.');
     return 'standalone';
   }
-  return await choose(rl, 'How should the daemon run?', ['standalone', 'launchagent'], current || 'standalone') as 'standalone' | 'launchagent';
+  if (svc.mode === 'systemd') {
+    const problem = await systemdUserProblem();
+    if (problem) {
+      console.log(`\n⚠ Can't use a systemd user service: ${problem}.`);
+      console.log('  Daemon will run standalone. Re-run --configure on a host with user systemd to enable auto-start.');
+      return 'standalone';
+    }
+  }
+  const options: RunMode[] = ['standalone', svc.mode];
+  return await choose(rl, `How should the daemon run? (${svc.mode} = ${svc.name}, auto-start)`, options, current || 'standalone') as RunMode;
 }
 
 async function promptLogs(rl: ReturnType<typeof createInterface>, baseDir: string, currentLogsDir?: string, currentTtl?: number): Promise<{ logsDir: string; logTtlDays: number }> {
@@ -184,8 +253,10 @@ async function promptClients(rl: ReturnType<typeof createInterface>): Promise<st
   return clients;
 }
 
-async function installLaunchAgent(baseDir: string, logsDir: string, logTtlDays: number): Promise<void> {
-  const { execSync } = await import('node:child_process');
+async function installService(baseDir: string, logsDir: string, logTtlDays: number): Promise<void> {
+  const svc = serviceKind();
+  if (!svc) return;
+  const { execSync, execFileSync } = await import('node:child_process');
 
   // Check if agent-memory-daemon is installed
   let daemonFound = false;
@@ -195,12 +266,12 @@ async function installLaunchAgent(baseDir: string, logsDir: string, logTtlDays: 
   } catch { /* not installed */ }
 
   if (!daemonFound) {
-    console.log('\n⚠ agent-memory-daemon is not installed (required for LaunchAgent mode).');
+    console.log(`\n⚠ agent-memory-daemon is not installed (required for ${svc.name} mode).`);
     const rl = createInterface({ input: stdin, output: stdout });
     const install = await yesNo(rl, 'Install it now (npm i -g agent-memory-daemon)?', true);
     rl.close();
     if (!install) {
-      console.log('  Skipping LaunchAgent install. Install manually, then run --configure.');
+      console.log(`  Skipping ${svc.name} install. Install manually, then run --configure.`);
       return;
     }
     try {
@@ -211,21 +282,19 @@ async function installLaunchAgent(baseDir: string, logsDir: string, logTtlDays: 
     }
   }
 
-  const scriptsDir = resolve(__dirname, '..', 'scripts');
-  const daemonSh = join(scriptsDir, 'daemon.sh');
-  if (!existsSync(daemonSh)) {
-    console.log('⚠ scripts/daemon.sh not found (running from npx?). Skipping LaunchAgent install.');
-    console.log('  To install manually: clone the repo and run ./scripts/daemon.sh start');
+  if (!existsSync(svc.script)) {
+    console.log(`⚠ ${svc.script} not found. Skipping ${svc.name} install.`);
+    console.log(`  To install manually: clone the repo and run ./scripts/${svc.script.split('/').pop()} start`);
     return;
   }
   const configPath = join(baseDir, 'memconsolidate.toml');
   try {
-    execSync(`bash "${daemonSh}" start "${configPath}"`, {
+    execFileSync('bash', [svc.script, 'start', configPath], {
       stdio: 'inherit',
       env: { ...process.env, LOG_DIR: logsDir, LOG_TTL_DAYS: String(logTtlDays) },
     });
   } catch {
-    console.log('⚠ Failed to install LaunchAgent. You can retry with: ./scripts/daemon.sh start');
+    console.log(`⚠ Failed to install ${svc.name}. You can retry with: mcp-agent-memory --daemon start`);
   }
 }
 
@@ -280,7 +349,7 @@ export async function runSetup(): Promise<void> {
       console.log(`\n✓ Daemon config written → ${tomlPath}`);
 
       if (cfg.backend === 'kiro') await installKiroAgent();
-      if (runMode === 'launchagent') await installLaunchAgent(baseDir, cfg.logsDir, cfg.logTtlDays);
+      if (runMode !== 'standalone') await installService(baseDir, cfg.logsDir, cfg.logTtlDays);
     }
 
     // Register clients — uses the memory/session dirs, not the daemon config.
@@ -346,9 +415,9 @@ export async function runConfigure(): Promise<void> {
 
     let backendCfg: Awaited<ReturnType<typeof promptBackend>> | undefined;
     let consolCfg: Awaited<ReturnType<typeof promptConsolidation>> | undefined;
-    let runMode: 'standalone' | 'launchagent' = 'standalone';
+    let runMode: RunMode = 'standalone';
     let logCfg = { logsDir: join(defaultBase, 'logs'), logTtlDays: 0 };
-    const currentRunMode = existsSync(join(homedir(), 'Library', 'LaunchAgents', 'com.agent-memory-daemon.plist')) ? 'launchagent' : 'standalone';
+    const currentRunMode = currentRunModeOnDisk();
 
     if (useDaemon) {
       backendCfg = await promptBackend(rl, daemonConfigured ? currentBackend : undefined);
@@ -383,22 +452,14 @@ export async function runConfigure(): Promise<void> {
       console.log(`\n✓ Config updated → ${tomlPath}`);
 
       if (cfg.backend === 'kiro') await installKiroAgent();
-      if (runMode === 'launchagent') {
-        await installLaunchAgent(defaultBase, cfg.logsDir, cfg.logTtlDays);
-      } else if (currentRunMode === 'launchagent') {
-        const { execSync } = await import('node:child_process');
-        const daemonSh = resolve(__dirname, '..', 'scripts', 'daemon.sh');
-        if (existsSync(daemonSh)) {
-          try { execSync(`bash "${daemonSh}" stop`, { stdio: 'inherit' }); } catch { /* not running */ }
-        }
+      if (runMode !== 'standalone') {
+        await installService(defaultBase, cfg.logsDir, cfg.logTtlDays);
+      } else if (currentRunMode !== 'standalone') {
+        await stopService();
       }
-    } else if (currentRunMode === 'launchagent') {
-      // User disabled the daemon entirely — unload the LaunchAgent.
-      const { execSync } = await import('node:child_process');
-      const daemonSh = resolve(__dirname, '..', 'scripts', 'daemon.sh');
-      if (existsSync(daemonSh)) {
-        try { execSync(`bash "${daemonSh}" stop`, { stdio: 'inherit' }); } catch { /* not running */ }
-      }
+    } else if (currentRunMode !== 'standalone') {
+      // User disabled the daemon entirely — stop the auto-start service.
+      await stopService();
     }
 
     // Register clients
@@ -444,25 +505,24 @@ export async function runRemove(): Promise<void> {
     const backup = await yesNo(rl, 'Back up memory directory before deleting?', true);
     const removeKiroAgent = await yesNo(rl, 'Remove lean Kiro agent (~/.kiro/agents/memconsolidate.json)?', true);
     const unregister = await yesNo(rl, 'Unregister MCP server from client configs (Kiro/Claude/Cursor)?', true);
-    const removeLaunchAgent = platform === 'darwin' && await yesNo(rl, 'Unload and delete LaunchAgent plist?', true);
+    const svc = serviceKind();
+    const removeSvc = !!svc && existsSync(svc.installedPath) && await yesNo(rl, `Stop and delete the ${svc.name} (${svc.installedPath})?`, true);
 
     rl.close();
 
-    // LaunchAgent first (unload before deleting its target)
-    if (removeLaunchAgent) {
-      const scriptsDir = resolve(__dirname, '..', 'scripts');
-      const daemonSh = join(scriptsDir, 'daemon.sh');
-      if (existsSync(daemonSh)) {
-        const { execSync } = await import('node:child_process');
-        try { execSync(`bash "${daemonSh}" remove`, { stdio: 'inherit' }); } catch { /* non-fatal */ }
+    // Service first (stop before deleting its target)
+    if (removeSvc && svc) {
+      const { execFileSync } = await import('node:child_process');
+      if (existsSync(svc.script)) {
+        try { execFileSync('bash', [svc.script, 'remove'], { stdio: 'inherit' }); } catch { /* non-fatal */ }
       } else {
-        const plist = join(homedir(), 'Library', 'LaunchAgents', 'com.agent-memory-daemon.plist');
-        if (existsSync(plist)) {
-          const { execSync } = await import('node:child_process');
-          try { execSync(`launchctl unload "${plist}"`, { stdio: 'ignore' }); } catch { /* may already be unloaded */ }
-          await rm(plist, { force: true });
-          console.log(`✓ Removed ${plist}`);
+        if (svc.mode === 'launchagent') {
+          try { execFileSync('launchctl', ['unload', svc.installedPath], { stdio: 'ignore' }); } catch { /* may already be unloaded */ }
+        } else {
+          try { execFileSync('systemctl', ['--user', 'disable', '--now', 'agent-memory-daemon.service'], { stdio: 'ignore' }); } catch { /* manager may be unreachable */ }
         }
+        await rm(svc.installedPath, { force: true });
+        console.log(`✓ Removed ${svc.installedPath}`);
       }
     }
 
@@ -512,20 +572,20 @@ export async function runDaemon(action: string): Promise<void> {
     console.error(`usage: mcp-agent-memory --daemon {${valid.join('|')}}`);
     process.exit(1);
   }
-  if (platform !== 'darwin') {
-    console.error('--daemon is macOS-only (manages a LaunchAgent).');
+  const svc = serviceKind();
+  if (!svc) {
+    console.error('--daemon supports macOS (LaunchAgent) and Linux (systemd user service) only.');
     process.exit(1);
   }
 
-  const scriptsDir = resolve(__dirname, '..', 'scripts');
-  const daemonSh = join(scriptsDir, 'daemon.sh');
+  const daemonSh = svc.script;
   if (!existsSync(daemonSh)) {
-    console.error('scripts/daemon.sh not found. Is the package installed correctly?');
+    console.error(`${daemonSh} not found. Is the package installed correctly?`);
     process.exit(1);
   }
 
   const configPath = join(homedir(), '.agent-memory', 'memconsolidate.toml');
-  const { execSync } = await import('node:child_process');
+  const { execFileSync } = await import('node:child_process');
 
   // Pull log settings from config comment so `start` restarts with the saved values.
   let env = { ...process.env };
@@ -535,12 +595,17 @@ export async function runDaemon(action: string): Promise<void> {
     if (m) env = { ...env, LOG_DIR: m[1], LOG_TTL_DAYS: m[2] };
   }
 
-  const run = (cmd: string) => execSync(`bash "${daemonSh}" ${cmd} "${configPath}"`, { stdio: 'inherit', env });
+  const run = (cmd: string) => execFileSync('bash', [daemonSh, cmd, configPath], { stdio: 'inherit', env });
 
-  if (action === 'restart') {
-    try { run('stop'); } catch { /* may not be running */ }
-    run('start');
-  } else {
-    run(action);
+  try {
+    if (action === 'restart') {
+      try { run('stop'); } catch { /* may not be running */ }
+      run('start');
+    } else {
+      run(action);
+    }
+  } catch (err) {
+    // The script already printed its error; propagate its exit code.
+    process.exit((err as { status?: number }).status ?? 1);
   }
 }
