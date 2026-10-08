@@ -57,7 +57,7 @@ npm install -g mcp-agent-memory
 
 ## Quick start (interactive wizard)
 
-The fastest way to set everything up — memory directory, daemon, client configs, logs, and LaunchAgent — is the setup wizard:
+The fastest way to set everything up — memory directory, daemon, client configs, logs, and auto-start service (macOS LaunchAgent or Linux systemd user service) — is the setup wizard:
 
 ```bash
 mcp-agent-memory --setup
@@ -69,13 +69,13 @@ It asks six questions:
 2. **Install the consolidation daemon?** — say "no" for MCP-only mode (agents can read/write/search memory, but no automatic consolidation)
 3. **LLM backend** — `bedrock`, `openai`, or `kiro` (skipped if you declined the daemon)
 4. **Consolidation settings** — `min_hours`, `min_sessions`, extraction interval, max chars
-5. **Run mode** — `standalone` (start manually) or `launchagent` (auto-start at login, macOS only)
+5. **Run mode** — `standalone` (start manually), `launchagent` (auto-start at login, macOS), or `systemd` (systemd user service, Linux). On Linux the wizard only offers `systemd` if `systemctl --user` is reachable; otherwise it falls back to `standalone` and tells you why.
 6. **Logs directory + TTL** — where to put logs, and how many days to keep them (`0` = forever)
 7. **Client registration** — auto-register the MCP server in Kiro, Claude Desktop, and/or Cursor configs (existing MCP entries are preserved)
 
 When you select the `kiro` backend, the wizard also copies a lean agent to `~/.kiro/agents/memconsolidate.json` that cuts token usage by ~7× (see [Kiro backend](#use-kiro-as-the-llm-backend)).
 
-When you select `launchagent`, the wizard checks that `agent-memory-daemon` is installed (and offers to `npm install -g` it if not), then registers and starts the plist.
+When you select `launchagent` or `systemd`, the wizard checks that `agent-memory-daemon` is installed (and offers to `npm install -g` it if not), then registers and starts the plist / user unit.
 
 ## CLI reference
 
@@ -85,12 +85,12 @@ mcp-agent-memory --setup               # first-time interactive setup
 mcp-agent-memory --configure           # re-run most steps; can add/remove the daemon later
 mcp-agent-memory --remove              # interactive uninstall (backup memory, clean configs)
 
-# macOS LaunchAgent control:
+# Auto-start service control (macOS LaunchAgent / Linux systemd user service):
 mcp-agent-memory --daemon status       # is the daemon running?
-mcp-agent-memory --daemon start        # load and start
-mcp-agent-memory --daemon stop         # unload (keeps the plist)
+mcp-agent-memory --daemon start        # install and start
+mcp-agent-memory --daemon stop         # stop (keeps the plist / unit)
 mcp-agent-memory --daemon restart      # stop + start
-mcp-agent-memory --daemon remove       # unload and delete the plist
+mcp-agent-memory --daemon remove       # stop and delete the plist / unit
 ```
 
 `--remove` preserves other entries in client MCP configs — only the `memory` key is deleted. By default it backs up `~/.agent-memory/` to a timestamped `.bak-*` directory so you can restore your consolidated memories.
@@ -128,6 +128,22 @@ Instead of starting the daemon manually, register it as a LaunchAgent:
 ```
 
 Pass a custom config path as a second arg: `./scripts/daemon.sh start /path/to/config.toml`. Logs land in `~/.agent-memory/logs/daemon.{out,err}.log`. `remove` leaves your config and memory files untouched.
+
+#### Run the daemon at login (Linux / systemd)
+
+On Linux, register it as a systemd user service:
+
+```bash
+./scripts/daemon-systemd.sh check      # is a systemd user manager reachable?
+./scripts/daemon-systemd.sh start      # write unit, enable, start
+./scripts/daemon-systemd.sh status     # check if it's running
+./scripts/daemon-systemd.sh stop       # stop (keeps the unit)
+./scripts/daemon-systemd.sh remove     # disable and delete the unit
+```
+
+The unit is written to `~/.config/systemd/user/agent-memory-daemon.service`. Logs go to the same place as on macOS. User services start at login. To start the daemon at boot without a login session, enable lingering: `sudo loginctl enable-linger $USER`.
+
+Some hosts (containers, sandboxed or SSH-only machines) don't have a reachable `systemctl --user`. In that case `check`/`start` exit with code 2 and an explanation. Run the daemon standalone instead.
 
 ### Use Kiro as the LLM backend
 

@@ -62,9 +62,27 @@ async function searchMemory(query: string): Promise<string> {
 
 const DAEMON_LABEL = 'com.agent-memory-daemon';
 
+function systemdStatus(): Promise<string> {
+  const configHome = process.env.XDG_CONFIG_HOME || join(homedir(), '.config');
+  const unitFile = join(configHome, 'systemd', 'user', 'agent-memory-daemon.service');
+  if (!existsSync(unitFile)) {
+    return Promise.resolve('The memory daemon is not installed as a systemd user service. Set it up with: mcp-agent-memory --setup');
+  }
+  return new Promise((res) => {
+    execFile('systemctl', ['--user', 'show', 'agent-memory-daemon.service', '-p', 'ActiveState', '-p', 'SubState', '-p', 'MainPID', '-p', 'ExecMainStatus'], (err, stdout) => {
+      if (err) return res(`Daemon unit is installed but the systemd user manager is unreachable.\nUnit: ${unitFile}`);
+      const prop = (k: string) => stdout.match(new RegExp(`^${k}=(.*)$`, 'm'))?.[1] ?? 'unknown';
+      const active = prop('ActiveState');
+      if (active !== 'active') return res(`Daemon is installed but not running (state: ${active}/${prop('SubState')}).\nUnit: ${unitFile}`);
+      res(`Daemon is running.\nPID: ${prop('MainPID')}\nLast exit status: ${prop('ExecMainStatus')}\nUnit: ${unitFile}`);
+    });
+  });
+}
+
 function daemonStatus(): Promise<string> {
+  if (platform() === 'linux') return systemdStatus();
   if (platform() !== 'darwin') {
-    return Promise.resolve('The memory daemon is not available in your configuration (macOS LaunchAgent only).');
+    return Promise.resolve('The memory daemon status check is not available on this platform (macOS LaunchAgent or Linux systemd only).');
   }
   const plist = join(homedir(), 'Library', 'LaunchAgents', `${DAEMON_LABEL}.plist`);
   if (!existsSync(plist)) {
