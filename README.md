@@ -104,7 +104,7 @@ If you'd rather skip the wizard, here's how to do it by hand.
 The MCP server works standalone — it just reads and writes files under `~/.agent-memory/`. Memories persist, but they won't be consolidated or extracted from sessions until you add the daemon.
 
 ```bash
-npm install -g agent-memory-daemon
+npm install -g agent-memory-daemon@^2.8.0
 
 # copy the example config
 mkdir -p ~/.agent-memory
