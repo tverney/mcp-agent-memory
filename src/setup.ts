@@ -268,16 +268,16 @@ async function installService(baseDir: string, logsDir: string, logTtlDays: numb
   if (!daemonFound) {
     console.log(`\n⚠ agent-memory-daemon is not installed (required for ${svc.name} mode).`);
     const rl = createInterface({ input: stdin, output: stdout });
-    const install = await yesNo(rl, 'Install it now (npm i -g agent-memory-daemon)?', true);
+    const install = await yesNo(rl, 'Install it now (npm i -g agent-memory-daemon@^2.8.0)?', true);
     rl.close();
     if (!install) {
       console.log(`  Skipping ${svc.name} install. Install manually, then run --configure.`);
       return;
     }
     try {
-      execSync('npm install -g agent-memory-daemon', { stdio: 'inherit' });
+      execSync('npm install -g agent-memory-daemon@^2.8.0', { stdio: 'inherit' });
     } catch {
-      console.log('⚠ npm install failed. Try manually: npm install -g agent-memory-daemon');
+      console.log('⚠ npm install failed. Try manually: npm install -g agent-memory-daemon@^2.8.0');
       return;
     }
   }

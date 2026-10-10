@@ -1,7 +1,7 @@
-# NOTE: agent-memory-daemon <= 2.7.0 does not expand ~ (tilde) in paths.
-# Replace /Users/YOU with your actual home path (e.g. /home/you on Linux), or use absolute paths.
-memory_directory = "/Users/YOU/.agent-memory/memory"
-session_directory = "/Users/YOU/.agent-memory/sessions"
+# Leading ~ expands to your home directory (requires agent-memory-daemon >= 2.8.0).
+# On older daemons, replace ~ with an absolute path.
+memory_directory = "~/.agent-memory/memory"
+session_directory = "~/.agent-memory/sessions"
 
 min_hours = 24
 min_sessions = 5
