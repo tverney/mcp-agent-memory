@@ -1,0 +1,159 @@
+name: 2. Publish release
+
+# Step 2 of 2, run after the "1. Open release PR" PR is merged.
+# Publishes the version in package.json on main: build, pack, npm publish,
+# annotated tag, and a GitHub release with notes since the previous tag.
+# Each publish step skips itself if already done, so a failed run can be re-run safely.
+
+on:
+  workflow_dispatch:
+    inputs:
+      summary:
+        description: 'Optional release title suffix, e.g. "memory search fixes" -> "v1.2.0 - memory search fixes"'
+        required: false
+        type: string
+      dry_run:
+        description: 'Dry run: build, pack and preview notes only (no publish, tag or release)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the tag and create the release
+      id-token: write # npm provenance
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Resolve version and release state
+        id: meta
+        shell: bash
+        env:
+          SUMMARY: ${{ inputs.summary }}
+        run: |
+          set -euo pipefail
+          NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="v$VERSION"
+          PREV=$(git tag --merged HEAD --list 'v*' --sort=-v:refname | grep -vxF "$TAG" | head -n1 || true)
+
+          TITLE="$TAG"
+          if [ -n "${SUMMARY// }" ]; then TITLE="$TAG - $SUMMARY"; fi
+
+          PUBLISHED=false
+          if [ -n "$(npm view "$NAME@$VERSION" version 2>/dev/null || true)" ]; then PUBLISHED=true; fi
+
+          TAGGED=false
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            TAGGED=true
+            TAG_SHA=$(git rev-list -n1 "$TAG")
+            if [ "$TAG_SHA" != "$GITHUB_SHA" ]; then
+              echo "::error::Tag $TAG already exists on $TAG_SHA, not on main ($GITHUB_SHA). Bump the version in package.json first."
+              exit 1
+            fi
+          fi
+
+          RELEASED=false
+          if gh release view "$TAG" >/dev/null 2>&1; then RELEASED=true; fi
+
+          if [ "$PUBLISHED$TAGGED$RELEASED" = "truetruetrue" ]; then
+            echo "::error::$TAG is already published, tagged and released. Bump the version in package.json (release PR) first."
+            exit 1
+          fi
+
+          {
+            echo "name=$NAME"
+            echo "version=$VERSION"
+            echo "tag=$TAG"
+            echo "prev=$PREV"
+            echo "title=$TITLE"
+            echo "published=$PUBLISHED"
+            echo "tagged=$TAGGED"
+            echo "released=$RELEASED"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Releasing $NAME $TAG (previous tag: ${PREV:-none}); published=$PUBLISHED tagged=$TAGGED released=$RELEASED"
+
+      - name: Install and build
+        run: |
+          npm ci
+          npm run build
+
+      - name: Pack
+        id: pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARBALL=$(npm pack --silent | tail -n1)
+          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
+          tar -tzf "$TARBALL"
+
+      - name: Generate release notes
+        shell: bash
+        env:
+          PREV: ${{ steps.meta.outputs.prev }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          TITLE: ${{ steps.meta.outputs.title }}
+        run: |
+          set -euo pipefail
+          node .github/scripts/release-notes.mjs "$PREV" HEAD "$TAG" "$GITHUB_REPOSITORY" > release-notes.md
+          { echo "# $TITLE"; echo; cat release-notes.md; } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ steps.meta.outputs.tag }}
+          path: |
+            ${{ steps.pack.outputs.tarball }}
+            release-notes.md
+
+      - name: Publish to npm
+        if: ${{ !inputs.dry_run && steps.meta.outputs.published == 'false' }}
+        shell: bash
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+        run: |
+          set -euo pipefail
+          # Uses the NPM_TOKEN secret when set; otherwise falls back to npm trusted publishing (OIDC).
+          if [ -n "$NPM_TOKEN" ]; then
+            npm config set //registry.npmjs.org/:_authToken "$NPM_TOKEN"
+          fi
+          npm publish "$TARBALL" --provenance --access public
+
+      - name: Create tag
+        if: ${{ !inputs.dry_run && steps.meta.outputs.tagged == 'false' }}
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          TITLE: ${{ steps.meta.outputs.title }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "$TITLE"
+          git push origin "refs/tags/$TAG"
+
+      - name: Create GitHub release
+        if: ${{ !inputs.dry_run && steps.meta.outputs.released == 'false' }}
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+          TITLE: ${{ steps.meta.outputs.title }}
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+        run: gh release create "$TAG" "$TARBALL" --title "$TITLE" --notes-file release-notes.md --verify-tag
