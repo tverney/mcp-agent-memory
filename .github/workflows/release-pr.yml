@@ -1,0 +1,110 @@
+name: 1. Open release PR
+
+# Step 1 of 2: bumps the version on a release/vX.Y.Z branch and opens a PR against main
+# with the release notes preview. After merging it, run "2. Publish release".
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump'
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
+      version:
+        description: 'Exact version instead of the bump, e.g. 1.2.0 (optional)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release-pr:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the release branch
+      pull-requests: write # open the PR
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Bump version
+        id: bump
+        shell: bash
+        env:
+          BUMP: ${{ inputs.bump }}
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          CURRENT="v$(node -p "require('./package.json').version")"
+          TARGET="${VERSION_INPUT// }"
+          TARGET="${TARGET#v}"
+          TAG=$(npm version "${TARGET:-$BUMP}" --no-git-tag-version)
+          BRANCH="release/$TAG"
+
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "::error::Tag $TAG already exists."
+            exit 1
+          fi
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null; then
+            echo "::error::Branch $BRANCH already exists. Merge or delete its PR first."
+            exit 1
+          fi
+
+          PREV=$(git tag --merged HEAD --list 'v*' --sort=-v:refname | head -n1 || true)
+
+          {
+            echo "tag=$TAG"
+            echo "branch=$BRANCH"
+            echo "prev=$PREV"
+          } >> "$GITHUB_OUTPUT"
+          echo "Bumping $CURRENT -> $TAG (previous tag: ${PREV:-none})"
+
+      - name: Push release branch
+        shell: bash
+        env:
+          TAG: ${{ steps.bump.outputs.tag }}
+          BRANCH: ${{ steps.bump.outputs.branch }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          git commit -am "chore: release $TAG"
+          git push origin "$BRANCH"
+
+      - name: Open PR
+        shell: bash
+        env:
+          TAG: ${{ steps.bump.outputs.tag }}
+          BRANCH: ${{ steps.bump.outputs.branch }}
+          PREV: ${{ steps.bump.outputs.prev }}
+        run: |
+          set -euo pipefail
+          {
+            echo "Bumps the version to \`$TAG\`. After merging, run the **2. Publish release** workflow."
+            echo
+            echo "Release notes preview:"
+            echo
+            node .github/scripts/release-notes.mjs "$PREV" HEAD "$TAG" "$GITHUB_REPOSITORY"
+          } > pr-body.md
+          URL=$(gh pr create --base main --head "$BRANCH" --title "chore: release $TAG" --body-file pr-body.md)
+          echo "Opened $URL" | tee -a "$GITHUB_STEP_SUMMARY"
